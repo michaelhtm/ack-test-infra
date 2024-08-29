@@ -35,7 +35,7 @@ func buildGetManifestsURL(repository, version string) string {
 // buildListTagsURL returns the URL to get the tags for a repository
 // in the ECR Public registry.
 func buildListTagsURL(repository string) string {
-	return fmt.Sprintf("https://%s/%s/tags/list", ecrPublicDNS, repository)
+	return fmt.Sprintf("https://%s/v2/%s/tags/list", ecrPublicDNS, repository)
 }
 
 // buildGetBlobURL returns the URL to get the blob for a specific

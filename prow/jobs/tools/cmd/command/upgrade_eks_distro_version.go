@@ -8,10 +8,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	OptEksDistroEcrRepository string
-)
-
 var upgradeEksDistroCMD = &cobra.Command{
 	Use:   "upgrade-eks-distro-version",
 	Short: "upgrade-eks-distro-version - queries ecr for latest eks-distro version and patches prow images if there's an update",
@@ -19,9 +15,6 @@ var upgradeEksDistroCMD = &cobra.Command{
 }
 
 func init() {
-	upgradeEksDistroCMD.PersistentFlags().StringVar(
-		&OptEksDistroEcrRepository, "eks-distro-ecr-repository", "v2/eks-distro-build-tooling/eks-distro-minimal-base-nonroot", "ecr gallery repository for eks-distro",
-	)
 	upgradeEksDistroCMD.PersistentFlags().StringVar(
 		&OptBuildConfigPath, "build-config-path", "./build_config.yaml", "path to build_config.yaml, where all the build versions are stored",
 	)
@@ -35,41 +28,43 @@ func runUpgradeEksDistro(cmd *cobra.Command, args []string) error {
 
 	log.SetPrefix("upgrade-eks-distro-version: ")
 
-	ecrEksDistroVersion, err := listRepositoryTags(OptEksDistroEcrRepository)
-	if err != nil {
-		return fmt.Errorf("unable to get eks-distro versions from %s: %v", OptEksDistroEcrRepository, err)
-	}
-	log.Printf("Successfully listed eks-distro versions from %s", OptEksDistroEcrRepository)
-
-	highestEcrEksDistroVersion, err := findHighestEcrEksDistroVersion(ecrEksDistroVersion)
-	if err != nil {
-		return err
-	}
-	log.Printf("Highest EKS Distro version: %s\n", highestEcrEksDistroVersion)
-
 	buildConfigData, err := readBuildConfigFile(OptBuildConfigPath)
 	if err != nil {
 		return err
 	}
-	log.Printf("Build Config EKS Distro version: %s\n", buildConfigData.EksDistroVersion)
+	currentEksDistroVersion := buildConfigData.EksDistro.CurrentVersion
+	eksDistroRepository := buildConfigData.EksDistro.Repository
 
-	needUpgrade := eksDistroVersionIsGreaterThan(highestEcrEksDistroVersion, buildConfigData.EksDistroVersion)
+	log.Printf("Build Config EKS Distro version: %s\n", currentEksDistroVersion)
+
+	ecrEksDistroVersions, err := listRepositoryTags(eksDistroRepository)
+	if err != nil {
+		return fmt.Errorf("unable to get eks-distro versions from %s: %v", eksDistroRepository, err)
+	}
+	log.Printf("Successfully listed eks-distro versions from %s", eksDistroRepository)
+
+	latestEcrEksDistroVersion, err := findHighestEcrEksDistroVersion(ecrEksDistroVersions)
+	if err != nil {
+		return err
+	}
+	log.Printf("Highest EKS Distro version: %s\n", latestEcrEksDistroVersion)
+
+	needUpgrade := eksDistroVersionIsGreaterThan(latestEcrEksDistroVersion, currentEksDistroVersion)
 	if !needUpgrade {
 		log.Println("eks-distro version is up-to-date")
 		return nil
 	}
 
-	log.Printf("Updating eks-distro version to %s\n", highestEcrEksDistroVersion)
-	olderVersion := buildConfigData.EksDistroVersion
-	buildConfigData.EksDistroVersion = highestEcrEksDistroVersion
+	log.Printf("Updating eks-distro version to %s\n", latestEcrEksDistroVersion)
+	buildConfigData.EksDistro.CurrentVersion = latestEcrEksDistroVersion
 	if err = patchBuildVersionFile(buildConfigData, OptBuildConfigPath); err != nil {
 		return err
 	}
 	log.Printf("Successfully updated eks-distro version in build_config")
 
-	commitBranch := fmt.Sprintf(updateEksDistroPRCommitBranch, highestEcrEksDistroVersion)
-	prSubject := fmt.Sprintf(updateEksDistroPRSubject, highestEcrEksDistroVersion)
-	prDescription := fmt.Sprintf(updateEksDistroPRDescription, olderVersion, highestEcrEksDistroVersion)
+	commitBranch := fmt.Sprintf(updateEksDistroPRCommitBranch, latestEcrEksDistroVersion)
+	prSubject := fmt.Sprintf(updateEksDistroPRSubject, latestEcrEksDistroVersion)
+	prDescription := fmt.Sprintf(updateEksDistroPRDescription, currentEksDistroVersion, latestEcrEksDistroVersion)
 
 	log.Println("Commiting changes and creating PR")
 	err = commitAndSendPR(OptSourceOwner, OptSourceRepo, commitBranch, updateEksDistroSourceFiles, baseBranch, prSubject, prDescription)

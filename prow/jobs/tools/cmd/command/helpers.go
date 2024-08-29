@@ -31,12 +31,17 @@ type ImagesConfig struct {
 	Images    map[string]string `yaml:"images"`
 }
 
+type BuildImageInfo struct {
+	CurrentVersion string `yaml:"current_version"`
+	Repository     string `yaml:"repository"`
+}
+
 // BuildConfig specifies the structure of build_config.yaml
 // where the build versions are stored
 type BuildConfig struct {
 	// so far we only have the go-version
-	GoVersion        string `yaml:"go_version"`
-	EksDistroVersion string `yaml:"eks_distro_version"`
+	Go        BuildImageInfo `yaml:"go_version"`
+	EksDistro BuildImageInfo `yaml:"eks_distro_version"`
 }
 
 func readBuildConfigFile(filepath string) (*BuildConfig, error) {

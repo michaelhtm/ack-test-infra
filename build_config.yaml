@@ -1,2 +1,7 @@
-go_version: 1.23.0
-eks_distro_version: 2024-08-13-1723575672.2
+go_version: 
+  repository: docker/library/golang
+  current_version: 1.23.0
+eks_distro_version: 
+  repository: eks-distro-build-tooling/eks-distro-minimal-base-nonroot
+  current_version: 2024-08-13-1723575672.2
+  
