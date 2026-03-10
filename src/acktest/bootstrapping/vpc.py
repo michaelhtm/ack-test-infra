@@ -1,5 +1,7 @@
 from typing import List, Union
 import boto3
+import ipaddress
+import time
 
 from dataclasses import dataclass, field
 
@@ -216,11 +218,43 @@ class SecurityGroup(Bootstrappable):
         super().cleanup()
 
 @dataclass
+class IPv6Subnet(Bootstrappable):
+    # Inputs
+    vpc_id: str
+    ipv6_cidr_block: str
+    ipv4_cidr_block: str
+
+    # Outputs
+    subnet_id: str = field(init=False)
+
+    @property
+    def ec2_client(self):
+        return boto3.client("ec2", region_name=self.region)
+
+    def bootstrap(self):
+        """Creates a dual-stack subnet with an IPv6 CIDR block."""
+        azs = self.ec2_client.describe_availability_zones()
+        az = azs['AvailabilityZones'][0]['ZoneName']
+
+        response = self.ec2_client.create_subnet(
+            VpcId=self.vpc_id,
+            CidrBlock=self.ipv4_cidr_block,
+            Ipv6CidrBlock=self.ipv6_cidr_block,
+            AvailabilityZone=az,
+        )
+        self.subnet_id = response['Subnet']['SubnetId']
+
+    def cleanup(self):
+        """Deletes the IPv6 subnet."""
+        self.ec2_client.delete_subnet(SubnetId=self.subnet_id)
+
+@dataclass
 class VPC(Bootstrappable):
     # Inputs
     name_prefix: Union[str, None] = field(default=None)
     num_public_subnet: int = 2
     num_private_subnet: int = 0
+    num_ipv6_subnet: int = 0
 
     vpc_cidr_block: str = field(default=VPC_CIDR_BLOCK)
     public_subnet_cidr_blocks: Union[List[str], None] = field(default=None)
@@ -230,10 +264,12 @@ class VPC(Bootstrappable):
     public_subnets: Subnets = field(init=False, default=None)
     private_subnets: Subnets = field(init=False, default=None)
     security_group: SecurityGroup = field(init=False, default=None)
+    ipv6_subnets: List[IPv6Subnet] = field(init=False, default=None)
 
     # Outputs
     name: Union[str, None] = field(default=None, init=False)
     vpc_id: str = field(init=False)
+    ipv6_cidr_block: Union[str, None] = field(init=False, default=None)
 
     def __post_init__(self):
         # Create CIDR blocks if none specified
@@ -266,6 +302,25 @@ class VPC(Bootstrappable):
             self.name = resources.random_suffix_name(self.name_prefix, 63)
             self.ec2_client.create_tags(Resources=[self.vpc_id], Tags=[{'Key': 'Name', 'Value': self.name}])
 
+        if self.num_ipv6_subnet > 0:
+            response = self.ec2_client.associate_vpc_cidr_block(
+                VpcId=self.vpc_id,
+                AmazonProvidedIpv6CidrBlock=True,
+            )
+            assoc_id = response['Ipv6CidrBlockAssociation']['AssociationId']
+            self.ipv6_cidr_block = self._wait_for_ipv6_cidr(assoc_id)
+
+            network = ipaddress.IPv6Network(self.ipv6_cidr_block)
+            ipv6_slash64s = list(network.subnets(new_prefix=64))
+            ipv4_offset = self.num_public_subnet + self.num_private_subnet
+
+            for i in range(self.num_ipv6_subnet):
+                subnet_ipv6_cidr = str(ipv6_slash64s[i])
+                subnet_ipv4_cidr = f"10.0.{ipv4_offset + i}.0/24"
+                self.ipv6_subnets.append(
+                    IPv6Subnet(self.vpc_id, subnet_ipv6_cidr, subnet_ipv4_cidr)
+                )
+
         if self.num_private_subnet > 0:
             self.private_subnets = Subnets(self.vpc_id, self.private_subnet_cidr_blocks, is_public=False, num_subnets=self.num_private_subnet)
         if self.num_public_subnet > 0:
@@ -296,3 +351,21 @@ class VPC(Bootstrappable):
 
         vpc = self.ec2_resource.Vpc(self.vpc_id)
         vpc.delete()
+
+    def _wait_for_ipv6_cidr(self, association_id, max_attempts=40, delay=5):
+        """Polls until the IPv6 CIDR block association reaches 'associated' state."""
+        for _ in range(max_attempts):
+            response = self.ec2_client.describe_vpcs(VpcIds=[self.vpc_id])
+            for assoc in response['Vpcs'][0].get('Ipv6CidrBlockAssociationSet', []):
+                if assoc['AssociationId'] == association_id:
+                    state = assoc['Ipv6CidrBlockState']['State']
+                    if state == 'associated':
+                        return assoc['Ipv6CidrBlock']
+                    if state in ('failed', 'disassociated'):
+                        raise BootstrapFailureException(
+                            f"IPv6 CIDR block association {association_id} entered state '{state}'"
+                        )
+            time.sleep(delay)
+        raise BootstrapFailureException(
+            f"Timed out waiting for IPv6 CIDR block association {association_id}"
+        )
